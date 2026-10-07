@@ -1,6 +1,16 @@
-# Flowprint
+<p align="center">
+  <img src="./assets/brand/flowprint-logo-dark.svg" alt="Flowprint" width="560">
+</p>
 
-**A map for codebases you don't know yet.**
+<p align="center">
+  <strong>A map for codebases you don't know yet.</strong>
+</p>
+
+<p align="center">
+  Flowprint helps developers find their starting point in unfamiliar JavaScript and TypeScript codebases.
+</p>
+
+---
 
 Ever opened someone else's project and wondered:
 
