@@ -1,8 +1,9 @@
 {
-  "name": "flowprint-m0",
+  "name": "flowprint",
   "version": "0.1.0-alpha.4",
   "private": true,
-  "description": "Flowprint M0 engineering feasibility spike \u2014 NOT v0.1, NOT production",
+  "description": "A local-first CLI for finding your way through unfamiliar JavaScript and TypeScript codebases.",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "benchmark": "tsx bench/harness/run.ts",
