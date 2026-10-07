@@ -1,0 +1,137 @@
+{
+  "caldiy": {
+    "expectedSha": "54343aa685ae8f33159d2f485ec4a57bad5c574a",
+    "pinnedAt": "2026-10-06",
+    "repo": "calcom/cal.diy"
+  },
+  "dub": {
+    "expectedSha": "d52438d99c10a6341ca92fa0e638d16584a8baaf",
+    "pinnedAt": "2026-10-06",
+    "repo": "dubinc/dub"
+  },
+  "formbricks": {
+    "expectedSha": "7f111e0484857805dbc029eb303d6abafef8cc61",
+    "pinnedAt": "2026-10-06",
+    "repo": "formbricks/formbricks"
+  },
+  "karakeep": {
+    "expectedSha": "75aeaaa4eb71b1d3143d7bdc6b88c66fbcfb5fea",
+    "pinnedAt": "2026-10-06",
+    "repo": "karakeep-app/karakeep"
+  },
+  "openstatus": {
+    "expectedSha": "3167008989f1fc8b7e703f8fbca9e5119bbb23f6",
+    "pinnedAt": "2026-10-06",
+    "repo": "openstatusHQ/openstatus"
+  },
+  "medusa": {
+    "repo": "medusajs/medusa",
+    "expectedSha": "14499a2e9309d653c0e4ec6aec3f88079751b4d2",
+    "pinnedAt": "2026-10-06"
+  },
+  "ghost": {
+    "repo": "TryGhost/Ghost",
+    "expectedSha": "e0fcc678ad168cab94fe3f6df8259f71f88ed20a",
+    "pinnedAt": "2026-10-06"
+  },
+  "postiz": {
+    "repo": "gitroomhq/postiz-app",
+    "expectedSha": "afa30c6534da4ece09ea5bda69d876a7c42870bf",
+    "pinnedAt": "2026-10-06"
+  },
+  "sim": {
+    "repo": "simstudioai/sim",
+    "expectedSha": "546d4e7e5d506bfbc2b74abe5fcb6d6e5f7ef6e1",
+    "pinnedAt": "2026-10-06"
+  },
+  "langfuse": {
+    "repo": "langfuse/langfuse",
+    "expectedSha": "d4574d17206ca581da567ae7fa2f6b0c9700f723",
+    "pinnedAt": "2026-10-06"
+  },
+  "babel": {
+    "expectedSha": "a544fb41fb9dc36b16b737910da9b79deb2ba9a7",
+    "pinnedAt": "2026-10-06",
+    "repo": "babel/babel"
+  },
+  "drizzle": {
+    "expectedSha": "15454dbe49d827c6081f3d0231e2e7985e517295",
+    "pinnedAt": "2026-10-06",
+    "repo": "drizzle-team/drizzle-orm"
+  },
+  "effect": {
+    "expectedSha": "eee0eeb1e40e47cfa6a4dfb0f07bb037c0f1ce02",
+    "pinnedAt": "2026-10-06",
+    "repo": "effect-ts/effect"
+  },
+  "growthbook": {
+    "expectedSha": "62a00f45b3f9b0817c46ee4baab47eeb4af1c3c0",
+    "pinnedAt": "2026-10-06",
+    "repo": "growthbook/growthbook"
+  },
+  "helena": {
+    "expectedSha": "5b98ddbce3422e54d995ae683600ed8624db1625",
+    "pinnedAt": "2026-10-06",
+    "repo": "wilhelmpa/helena"
+  },
+  "maludb": {
+    "expectedSha": "695ca40ae56307b1150a2d09dcd369fac2dbc778",
+    "pinnedAt": "2026-10-06",
+    "repo": "maludb/maludb-fastify-api-server"
+  },
+  "n8n": {
+    "expectedSha": "b7960d7a858a3e28c6a703a59721f5a029d8cc36",
+    "pinnedAt": "2026-10-06",
+    "repo": "n8n-io/n8n"
+  },
+  "nx": {
+    "expectedSha": "53c247cd9134da0f2e296c46a2249c787e47a02c",
+    "pinnedAt": "2026-10-06",
+    "repo": "nrwl/nx"
+  },
+  "opencollective": {
+    "expectedSha": "8207aa8e5e4ce4fee1390f1811beaf53d96fc0b9",
+    "pinnedAt": "2026-10-06",
+    "repo": "opencollective/opencollective-frontend"
+  },
+  "react": {
+    "expectedSha": "278794d7dee9cd2a3a2aaf9f0b2a4b8b747d74ee",
+    "pinnedAt": "2026-10-06",
+    "repo": "facebook/react"
+  },
+  "redesocial": {
+    "expectedSha": "1ab64847c51fa7d97cf29a8cf7ab046c5f3c1501",
+    "pinnedAt": "2026-10-06",
+    "repo": "n1-tecnologia/rede-social"
+  },
+  "supabase": {
+    "expectedSha": "12afe399995143a2cc699eabbbd29596f4e64945",
+    "pinnedAt": "2026-10-06",
+    "repo": "supabase/supabase"
+  },
+  "tanstackquery": {
+    "expectedSha": "d169ee87786c250ccc791f5b22c40141a489ec88",
+    "pinnedAt": "2026-10-06",
+    "repo": "TanStack/query"
+  },
+  "trpc": {
+    "expectedSha": "d756e591a5e37ef20b8d75ecd4d736c195497289",
+    "pinnedAt": "2026-10-06",
+    "repo": "trpc/trpc"
+  },
+  "vendure": {
+    "expectedSha": "cc88031a2079ea41c0375aeba524f601f3124a6b",
+    "pinnedAt": "2026-10-06",
+    "repo": "vendurehq/vendure"
+  },
+  "vercelai": {
+    "expectedSha": "758b092b39df784ed06abdf7af42fa31b74c853f",
+    "pinnedAt": "2026-10-06",
+    "repo": "vercel/ai"
+  },
+  "zod": {
+    "expectedSha": "0b216ef674e297ebe41d8bf902262e56f8755822",
+    "pinnedAt": "2026-10-06",
+    "repo": "colinhacks/zod"
+  }
+}

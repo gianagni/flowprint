@@ -1,0 +1,21 @@
+{
+  "name": "flowprint-m0",
+  "version": "0.1.0-alpha.4",
+  "private": true,
+  "description": "Flowprint M0 engineering feasibility spike \u2014 NOT v0.1, NOT production",
+  "type": "module",
+  "scripts": {
+    "benchmark": "tsx bench/harness/run.ts",
+    "flowprint": "tsx packages/flowprint/src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx test/regress.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  },
+  "dependencies": {
+    "oxc-parser": "0.153.0"
+  }
+}
