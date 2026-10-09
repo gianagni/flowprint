@@ -191,7 +191,12 @@ jobs:
         run: |
           ./node_modules/.bin/flowprint --help > /dev/null;    [ $? -eq 0 ] && echo "PASS: --help exit 0" || { echo "FAIL"; exit 1; }
           ./node_modules/.bin/flowprint --version > /dev/null; [ $? -eq 0 ] && echo "PASS: --version exit 0" || { echo "FAIL"; exit 1; }
-          ./node_modules/.bin/flowprint /nonexistent-path-xyz > /dev/null 2>&1; code=$?
+          # set -e is active: capture via if/else so exit 2 doesn't kill the step.
+          if ./node_modules/.bin/flowprint /nonexistent-path-xyz > /dev/null 2>&1; then
+            code=0
+          else
+            code=$?
+          fi
           [ $code -eq 2 ] && echo "PASS: bad path exit 2" || { echo "FAIL: bad path exit $code (expected 2)"; exit 1; }
 
       - name: Summary
