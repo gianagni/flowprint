@@ -40,6 +40,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     # 15 min is generous for build + smoke; prevents hung-runner billing
     timeout-minutes: 15
+    # Isolated smoke-test dir outside the repo: avoids pnpm workspace
+    # interference and npm prefix walking up to the repo root.
+    env:
+      SMOKE_DIR: ${{ runner.temp }}/smoke-test
+      TARBALL: ${{ github.workspace }}/dist-stage/flowprint-0.1.0-alpha.5.tgz
 
     steps:
       - name: Verify runner OS and architecture
@@ -118,15 +123,14 @@ jobs:
       - name: Clean install tarball
         shell: bash
         run: |
-          rm -rf smoke-test && mkdir smoke-test && cd smoke-test
-          # Independent npm project: without package.json, npm walks up and
-          # installs into the repo root instead of smoke-test/ (proven root
-          # cause of the first CI failure).
+          rm -rf "$SMOKE_DIR" && mkdir -p "$SMOKE_DIR" && cd "$SMOKE_DIR"
+          # Independent project outside the repo: npm init prevents prefix
+          # walking up; location outside repo prevents pnpm workspace issues.
           npm init -y > /dev/null
           if [ "${{ matrix.pm }}" = "npm" ]; then
-            npm install ../dist-stage/flowprint-0.1.0-alpha.5.tgz --no-audit --no-fund
+            npm install "$TARBALL" --no-audit --no-fund
           else
-            pnpm add file:../dist-stage/flowprint-0.1.0-alpha.5.tgz
+            pnpm add "file:$TARBALL"
           fi
           [ -f node_modules/.bin/flowprint ] \
             && echo "PASS: clean install (${{ matrix.pm }})" \
@@ -134,7 +138,7 @@ jobs:
 
       - name: Binary --help and --version
         shell: bash
-        working-directory: smoke-test
+        working-directory: ${{ env.SMOKE_DIR }}
         run: |
           ./node_modules/.bin/flowprint --help > help.txt
           grep -q "Usage:" help.txt && echo "PASS: --help" || { echo "FAIL: --help"; exit 1; }
@@ -143,7 +147,7 @@ jobs:
 
       - name: Native optional binding loads
         shell: bash
-        working-directory: smoke-test
+        working-directory: ${{ env.SMOKE_DIR }}
         run: |
           # bin.js preflights oxc-parser on every run; --version already proved it.
           # Explicit check: require the binding from the installed tree.
@@ -156,7 +160,7 @@ jobs:
 
       - name: Fixture analysis (Next.js)
         shell: bash
-        working-directory: smoke-test
+        working-directory: ${{ env.SMOKE_DIR }}
         run: |
           mkdir -p fx/app && cd fx
           printf '{"name":"t","dependencies":{"next":"14.0.0"}}' > package.json
@@ -167,7 +171,7 @@ jobs:
 
       - name: --full completeness
         shell: bash
-        working-directory: smoke-test/fx
+        working-directory: ${{ env.SMOKE_DIR }}/fx
         run: |
           ../node_modules/.bin/flowprint --full . > full.txt; code=$?
           [ $code -eq 0 ] && echo "PASS: --full (exit 0)" || { echo "FAIL: --full exit $code"; exit 1; }
@@ -175,7 +179,7 @@ jobs:
 
       - name: Child parser fork and IPC
         shell: bash
-        working-directory: smoke-test
+        working-directory: ${{ env.SMOKE_DIR }}
         run: |
           # Fixture analysis above already exercises fork+IPC (exit 0 proves it).
           # Explicit check: run on a file with TS syntax requiring the parser.
@@ -187,7 +191,7 @@ jobs:
 
       - name: Exit code contract
         shell: bash
-        working-directory: smoke-test
+        working-directory: ${{ env.SMOKE_DIR }}
         run: |
           ./node_modules/.bin/flowprint --help > /dev/null;    [ $? -eq 0 ] && echo "PASS: --help exit 0" || { echo "FAIL"; exit 1; }
           ./node_modules/.bin/flowprint --version > /dev/null; [ $? -eq 0 ] && echo "PASS: --version exit 0" || { echo "FAIL"; exit 1; }
