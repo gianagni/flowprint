@@ -119,12 +119,16 @@ jobs:
         shell: bash
         run: |
           rm -rf smoke-test && mkdir smoke-test && cd smoke-test
+          # Independent npm project: without package.json, npm walks up and
+          # installs into the repo root instead of smoke-test/ (proven root
+          # cause of the first CI failure).
+          npm init -y > /dev/null
           if [ "${{ matrix.pm }}" = "npm" ]; then
             npm install ../dist-stage/flowprint-0.1.0-alpha.5.tgz --no-audit --no-fund
           else
             pnpm add file:../dist-stage/flowprint-0.1.0-alpha.5.tgz
           fi
-          [ -x node_modules/.bin/flowprint ] || [ -f node_modules/.bin/flowprint ] \
+          [ -f node_modules/.bin/flowprint ] \
             && echo "PASS: clean install (${{ matrix.pm }})" \
             || { echo "FAIL: binary not installed"; exit 1; }
 
