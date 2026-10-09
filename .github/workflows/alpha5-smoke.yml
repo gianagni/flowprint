@@ -168,9 +168,13 @@ jobs:
         run: |
           # bin.js preflights oxc-parser on every run; --version already proved it.
           # Explicit check: require the binding from the installed tree.
+          # Use realpath: pnpm symlinks node_modules/flowprint, and
+          # createRequire() on the symlinked path cannot resolve siblings.
           node -e "
             const { createRequire } = require('module');
-            const req = createRequire(require('path').resolve('node_modules/flowprint/dist/packages/flowprint/src/bin.js'));
+            const fs = require('fs');
+            const binPath = fs.realpathSync('node_modules/flowprint/dist/packages/flowprint/src/bin.js');
+            const req = createRequire(binPath);
             try { req('oxc-parser'); console.log('PASS: native binding loads'); }
             catch (e) { console.log('FAIL: ' + e.message.split('\n')[0]); process.exit(1); }
           "
