@@ -191,7 +191,8 @@ jobs:
         run: |
           ./node_modules/.bin/flowprint --help > /dev/null;    [ $? -eq 0 ] && echo "PASS: --help exit 0" || { echo "FAIL"; exit 1; }
           ./node_modules/.bin/flowprint --version > /dev/null; [ $? -eq 0 ] && echo "PASS: --version exit 0" || { echo "FAIL"; exit 1; }
-          ./node_modules/.bin/flowprint /nonexistent-path-xyz > /dev/null 2>&1; [ $? -eq 2 ] && echo "PASS: bad path exit 2" || echo "NOT RUN: bad-path exit code differs on this platform ($?)"
+          ./node_modules/.bin/flowprint /nonexistent-path-xyz > /dev/null 2>&1; code=$?
+          [ $code -eq 2 ] && echo "PASS: bad path exit 2" || { echo "FAIL: bad path exit $code (expected 2)"; exit 1; }
 
       - name: Summary
         if: always()
