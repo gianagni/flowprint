@@ -124,13 +124,16 @@ jobs:
         shell: bash
         run: |
           rm -rf "$SMOKE_DIR" && mkdir -p "$SMOKE_DIR" && cd "$SMOKE_DIR"
+          # Copy tarball locally: avoids absolute Windows path issues
+          # (mixed slashes, file: protocol) when passed to npm/pnpm.
+          cp "$TARBALL" ./flowprint.tgz
           # Independent project outside the repo: npm init prevents prefix
           # walking up; location outside repo prevents pnpm workspace issues.
           npm init -y > /dev/null
           if [ "${{ matrix.pm }}" = "npm" ]; then
-            npm install "$TARBALL" --no-audit --no-fund
+            npm install ./flowprint.tgz --no-audit --no-fund
           else
-            pnpm add "file:$TARBALL"
+            pnpm add file:./flowprint.tgz
           fi
           [ -f node_modules/.bin/flowprint ] \
             && echo "PASS: clean install (${{ matrix.pm }})" \
