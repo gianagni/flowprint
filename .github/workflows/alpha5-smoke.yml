@@ -40,10 +40,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     # 15 min is generous for build + smoke; prevents hung-runner billing
     timeout-minutes: 15
-    # Isolated smoke-test dir outside the repo: avoids pnpm workspace
-    # interference and npm prefix walking up to the repo root.
+    # NOTE: runner context is NOT available in job-level env.
+    # SMOKE_DIR is set by the "Prepare smoke-test dir" step via GITHUB_ENV.
     env:
-      SMOKE_DIR: ${{ runner.temp }}/smoke-test
       TARBALL: ${{ github.workspace }}/dist-stage/flowprint-0.1.0-alpha.5.tgz
 
     steps:
@@ -120,15 +119,30 @@ jobs:
           npm pack
           ls flowprint-0.1.0-alpha.5.tgz && echo "PASS: tarball packed"
 
-      - name: Clean install tarball
+      - name: Prepare smoke-test dir
         shell: bash
         run: |
-          rm -rf "$SMOKE_DIR" && mkdir -p "$SMOKE_DIR" && cd "$SMOKE_DIR"
-          # Copy tarball locally: avoids absolute Windows path issues
-          # (mixed slashes, file: protocol) when passed to npm/pnpm.
-          cp "$TARBALL" ./flowprint.tgz
-          # Independent project outside the repo: npm init prevents prefix
-          # walking up; location outside repo prevents pnpm workspace issues.
+          node -e "
+            const fs = require('fs');
+            const path = require('path');
+            // Isolated dir outside the repo: avoids pnpm workspace
+            // interference and npm prefix walking up to the repo root.
+            // Uses Node path (not bash) so Windows backslashes are handled.
+            const dir = path.join(process.env.RUNNER_TEMP, 'smoke-test');
+            fs.rmSync(dir, { recursive: true, force: true });
+            fs.mkdirSync(dir, { recursive: true });
+            fs.copyFileSync(process.env.TARBALL, path.join(dir, 'flowprint.tgz'));
+            fs.appendFileSync(process.env.GITHUB_ENV, 'SMOKE_DIR=' + dir + '\n');
+            console.log('SMOKE_DIR=' + dir);
+          "
+          echo "PASS: smoke-test dir prepared"
+
+      - name: Clean install tarball
+        shell: bash
+        working-directory: ${{ env.SMOKE_DIR }}
+        run: |
+          # Dir and tarball already prepared by previous step.
+          # Independent project: npm init prevents prefix walking up.
           npm init -y > /dev/null
           if [ "${{ matrix.pm }}" = "npm" ]; then
             npm install ./flowprint.tgz --no-audit --no-fund
