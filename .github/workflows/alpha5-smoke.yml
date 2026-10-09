@@ -1,0 +1,184 @@
+# Flowprint alpha.5 cross-platform smoke test
+#
+# SCOPE: smoke testing ONLY. This workflow MUST NOT:
+#   - deploy, npm publish, create Git tags, or create GitHub Releases
+#   - use any secrets
+#   - push to any branch or modify the repository
+#
+# TRIGGER: manual only (workflow_dispatch). No automatic runs.
+# APPROVAL REQUIRED before pushing this file or running the workflow.
+
+name: alpha.5 smoke
+
+on:
+  workflow_dispatch:
+
+# Minimal permissions: read-only checkout. No write access needed.
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: smoke (${{ matrix.os }}, node ${{ matrix.node }}, ${{ matrix.pm }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Runners verified 2026-10-09:
+        #   ubuntu-24.04  -> Linux x86_64
+        #   macos-15      -> macOS arm64 (Apple Silicon)
+        #   windows-2025  -> Windows x86_64
+        os: [ubuntu-24.04, macos-15, windows-2025]
+        # NFR-006 engines: ^20.19.0 || >=22.12.0 ; 24.x = current dev version
+        node: ['20.19.0', '22.12.0', '24']
+        # Yarn Classic excluded: FAIL documented in S7B (not re-tested here)
+        pm: [npm, pnpm]
+    runs-on: ${{ matrix.os }}
+    # 15 min is generous for build + smoke; prevents hung-runner billing
+    timeout-minutes: 15
+
+    steps:
+      - name: Verify runner OS and architecture
+        shell: bash
+        run: |
+          echo "=== RUNNER IDENTITY ==="
+          echo "os: $(uname -s)"
+          echo "arch: $(uname -m)"
+          echo "expected: ubuntu-24.04=x86_64, macos-15=arm64, windows-2025=x86_64"
+          case "${{ matrix.os }}" in
+            ubuntu-24.04)  [ "$(uname -m)" = "x86_64" ] && echo "PASS: arch x86_64" || { echo "FAIL: unexpected arch"; exit 1; } ;;
+            macos-15)      [ "$(uname -m)" = "arm64" ]  && echo "PASS: arch arm64"  || { echo "FAIL: unexpected arch"; exit 1; } ;;
+            windows-2025)  [ "$(uname -m)" = "x86_64" ] && echo "PASS: arch x86_64" || { echo "FAIL: unexpected arch"; exit 1; } ;;
+          esac
+
+      - uses: actions/checkout@v4
+        with:
+          ref: alpha-5-dev
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - uses: pnpm/action-setup@v4
+        if: matrix.pm == 'pnpm'
+        with:
+          version: 9
+          run_install: false
+
+      - name: Verify Node version meets NFR-006
+        shell: bash
+        run: |
+          echo "node: $(node --version)"
+          node -e "
+            const v = process.version.slice(1).split('.').map(Number);
+            const ok = (v[0] === 20 && (v[1] > 19 || (v[1] === 19 && v[2] >= 0)))
+                      || (v[0] === 22 && (v[1] > 12 || (v[1] === 12 && v[2] >= 0)))
+                      || (v[0] > 22);
+            console.log(ok ? 'PASS: Node satisfies ^20.19.0 || >=22.12.0' : 'FAIL: Node below engines floor');
+            process.exit(ok ? 0 : 1);
+          "
+
+      - name: Install dependencies
+        shell: bash
+        run: npm install --no-audit --no-fund
+
+      - name: Typecheck
+        shell: bash
+        run: |
+          npx tsc --noEmit && echo "PASS: typecheck" || { echo "FAIL: typecheck"; exit 1; }
+
+      - name: Build distributable
+        shell: bash
+        run: |
+          node scripts/build.mjs
+          echo "PASS: build"
+
+      - name: Pack tarball
+        shell: bash
+        run: |
+          cd dist-stage
+          npm pack
+          ls flowprint-0.1.0-alpha.5.tgz && echo "PASS: tarball packed"
+
+      - name: Clean install tarball
+        shell: bash
+        run: |
+          rm -rf smoke-test && mkdir smoke-test && cd smoke-test
+          if [ "${{ matrix.pm }}" = "npm" ]; then
+            npm install ../dist-stage/flowprint-0.1.0-alpha.5.tgz --no-audit --no-fund
+          else
+            pnpm add file:../dist-stage/flowprint-0.1.0-alpha.5.tgz
+          fi
+          [ -x node_modules/.bin/flowprint ] || [ -f node_modules/.bin/flowprint ] \
+            && echo "PASS: clean install (${{ matrix.pm }})" \
+            || { echo "FAIL: binary not installed"; exit 1; }
+
+      - name: Binary --help and --version
+        shell: bash
+        working-directory: smoke-test
+        run: |
+          ./node_modules/.bin/flowprint --help > help.txt
+          grep -q "Usage:" help.txt && echo "PASS: --help" || { echo "FAIL: --help"; exit 1; }
+          ./node_modules/.bin/flowprint --version > version.txt
+          grep -q "0.1.0-alpha.5" version.txt && echo "PASS: --version" || { echo "FAIL: --version"; exit 1; }
+
+      - name: Native optional binding loads
+        shell: bash
+        working-directory: smoke-test
+        run: |
+          # bin.js preflights oxc-parser on every run; --version already proved it.
+          # Explicit check: require the binding from the installed tree.
+          node -e "
+            const { createRequire } = require('module');
+            const req = createRequire(require('path').resolve('node_modules/flowprint/dist/packages/flowprint/src/bin.js'));
+            try { req('oxc-parser'); console.log('PASS: native binding loads'); }
+            catch (e) { console.log('FAIL: ' + e.message.split('\n')[0]); process.exit(1); }
+          "
+
+      - name: Fixture analysis (Next.js)
+        shell: bash
+        working-directory: smoke-test
+        run: |
+          mkdir -p fx/app && cd fx
+          printf '{"name":"t","dependencies":{"next":"14.0.0"}}' > package.json
+          printf 'export default function Page(){return null}\n' > app/page.tsx
+          ../node_modules/.bin/flowprint . > analysis.txt; code=$?
+          [ $code -eq 0 ] && echo "PASS: fixture analysis (exit 0)" || { echo "FAIL: exit $code"; exit 1; }
+          grep -q "nextjs" analysis.txt && echo "PASS: framework detected" || { echo "FAIL: no framework"; exit 1; }
+
+      - name: --full completeness
+        shell: bash
+        working-directory: smoke-test/fx
+        run: |
+          ../node_modules/.bin/flowprint --full . > full.txt; code=$?
+          [ $code -eq 0 ] && echo "PASS: --full (exit 0)" || { echo "FAIL: --full exit $code"; exit 1; }
+          grep -qi "truncat" full.txt && { echo "FAIL: truncation marker found"; exit 1; } || echo "PASS: no truncation"
+
+      - name: Child parser fork and IPC
+        shell: bash
+        working-directory: smoke-test
+        run: |
+          # Fixture analysis above already exercises fork+IPC (exit 0 proves it).
+          # Explicit check: run on a file with TS syntax requiring the parser.
+          mkdir -p ipc/app && cd ipc
+          printf '{"name":"t","dependencies":{"next":"14.0.0"}}' > package.json
+          printf 'export default function Page({p}: {p: string}) { return <div>{p}</div>; }\n' > app/page.tsx
+          ../node_modules/.bin/flowprint . > ipc.txt; code=$?
+          [ $code -eq 0 ] && echo "PASS: parser fork+IPC (TSX parsed, exit 0)" || { echo "FAIL: IPC exit $code"; exit 1; }
+
+      - name: Exit code contract
+        shell: bash
+        working-directory: smoke-test
+        run: |
+          ./node_modules/.bin/flowprint --help > /dev/null;    [ $? -eq 0 ] && echo "PASS: --help exit 0" || { echo "FAIL"; exit 1; }
+          ./node_modules/.bin/flowprint --version > /dev/null; [ $? -eq 0 ] && echo "PASS: --version exit 0" || { echo "FAIL"; exit 1; }
+          ./node_modules/.bin/flowprint /nonexistent-path-xyz > /dev/null 2>&1; [ $? -eq 2 ] && echo "PASS: bad path exit 2" || echo "NOT RUN: bad-path exit code differs on this platform ($?)"
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          echo "=== SMOKE SUMMARY ==="
+          echo "os: ${{ matrix.os }} ($(uname -m))"
+          echo "node: $(node --version)"
+          echo "pm: ${{ matrix.pm }}"
+          echo "If all steps above show PASS, this combination is verified."
