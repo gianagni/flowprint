@@ -5,11 +5,11 @@
  * The renderer must never invent confidence.
  */
 import { existsSync } from 'node:fs';
-import { join, resolve as resolvePath } from 'node:path';
+import { join, relative, resolve as resolvePath, sep } from 'node:path';
 import type { AppCandidate } from '../discovery/index.js';
 import type { ResolutionContext } from '../resolution/index.js';
 import { resolveImport } from '../resolution/index.js';
-import { splitBare } from '../resolution/tsconfig.js';
+import { classifyPathTarget } from '../resolution/tsconfig.js';
 import type { ModuleRecord } from '../parsing/index.js';
 import type { FrameworkAppResult } from '../framework/index.js';
 import type { UnsupportedBoundary } from '../boundaries/types.js';
@@ -19,6 +19,7 @@ import type {
   AppInfo,
   Claim,
   Confidence,
+  DirReadFailure,
   EntryPoint,
   ImportProbeResult,
   ResolutionStats,
@@ -47,6 +48,8 @@ export interface ModelInput {
   trpcProcedures: TrpcProcedure[];
   /** Detected-but-unsupported boundaries (B3); detected from global discovery. */
   boundaries: UnsupportedBoundary[];
+  /** Directory-read failures, discovery + analysis phases merged (TR-006). */
+  dirReadFailures: DirReadFailure[];
 }
 
 export async function assembleResult(input: ModelInput): Promise<AnalysisResult> {
@@ -61,6 +64,7 @@ export async function assembleResult(input: ModelInput): Promise<AnalysisResult>
     apps.push({
       path: cand.dir,
       framework: fw.frameworkClaim,
+      nextVersion: cand.nextRange,
       tsconfigs,
       aliases,
       notes: [...fw.notes],
@@ -96,6 +100,7 @@ export async function assembleResult(input: ModelInput): Promise<AnalysisResult>
       const methods = fw.methodsClaims.get(r.file) ?? unknown([], 'no method inventory');
       routes.push({
         file: r.file,
+        kind: r.kind === 'route' ? 'api' : r.kind,
         router: resolved('app-router', appEv?.detected.reason ?? 'App Router route file'),
         skeleton,
         concreteValues,
@@ -106,6 +111,7 @@ export async function assembleResult(input: ModelInput): Promise<AnalysisResult>
     for (const p of fw.pagesRoutes) {
       routes.push({
         file: p.file,
+        kind: p.isApi ? 'api' : 'page',
         router: resolved('pages-router', pagesEv?.detected.reason ?? 'Pages Router route file'),
         skeleton: p.skeleton,
         concreteValues: p.concreteValues,
@@ -154,6 +160,9 @@ export async function assembleResult(input: ModelInput): Promise<AnalysisResult>
         if (!seenFallback.has(key)) {
           seenFallback.add(key);
           input.extraUnknowns.push({
+            kind: 'coverage',
+            category: 'dist-src-fallback',
+            subject: `${rel} :: ${e.spec}`,
             area: 'dist-vs-src fallback',
             detail: `${e.spec} in ${rel}: exports/main point at absent build output → src/ fallback used (I)`,
             reason: 'whether dist layout mirrors src layout is an inference',
@@ -204,6 +213,7 @@ export async function assembleResult(input: ModelInput): Promise<AnalysisResult>
     resolutionStats: stats,
     unknowns: deduped,
     boundaries: input.boundaries,
+    dirReadFailures: input.dirReadFailures,
   };
 }
 
@@ -326,25 +336,28 @@ async function appAliases(
       for (const t of targets) {
         const starIdx = t.indexOf('*');
         const base = starIdx === -1 ? t : t.slice(0, starIdx);
-        if (base.startsWith('.')) {
-          const absBase = resolvePath(baseAbs, base);
-          if (!existsSync(absBase)) {
-            extraUnknowns.push({
-              area: 'stale tsconfig entries',
-              detail: `alias ${pattern} → ${t} in ${owner}: target base does not exist (dead alias)`,
-              reason: 'alias target absent on disk',
-            });
-          }
-        } else {
-          // Bare-specifier target (chained alias): must name a known workspace package.
-          const { name } = splitBare(base.replace(/\/$/, ''));
-          if (!ctx.nameToDir.has(name)) {
-            extraUnknowns.push({
-              area: 'stale tsconfig entries',
-              detail: `alias ${pattern} → ${t} in ${owner}: chained bare target "${name}" is not a known workspace package`,
-              reason: 'chained alias target unresolvable',
-            });
-          }
+        // TR-001: classify with exactly the resolver's semantics
+        // (classifyPathTarget mirrors rebaseTargets). A non-relative target
+        // that does not name a workspace package is baseUrl-relative per TS
+        // semantics — it must NOT be misreported as a broken chained alias.
+        const checkBase = base === '' ? '.' : base;
+        const cls = classifyPathTarget(checkBase, baseAbs, ctx.nameToDir);
+        if ('chained' in cls) continue; // resolved via the workspace package map
+        if (!existsSync(cls.abs)) {
+          // TR-002: report observed absence only — never conclude the
+          // config is broken (the target may be generated, or resolved
+          // differently at build time).
+          const baseRel = relative(repoRoot, baseAbs).split(sep).join('/');
+          extraUnknowns.push({
+            kind: 'fact',
+            category: 'alias-target-absent',
+            subject: `${owner} :: ${pattern}`,
+            area: 'alias target absent on disk',
+            detail:
+              `alias ${pattern} → ${t} in ${owner}: "${checkBase}" not found on disk ` +
+              `(checked against ${baseRel || '(repo root)'}; may be generated or resolved differently at build time)`,
+            reason: 'alias target absent on disk',
+          });
         }
       }
     }

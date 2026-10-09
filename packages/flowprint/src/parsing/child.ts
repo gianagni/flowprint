@@ -19,6 +19,13 @@ interface ChildRequest {
   files: string[];
 }
 
+// Signal readiness immediately — the parent uses this to distinguish
+// spawn/startup failure (died before 'ready') from content crash (died
+// after 'ready' while processing). EC-01.
+if (process.send) {
+  process.send({ type: 'ready' });
+}
+
 process.on('message', (msg: unknown) => {
   void (async () => {
     const { repoRoot, files } = msg as ChildRequest;

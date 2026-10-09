@@ -141,6 +141,14 @@ export interface ModuleRecord {
   directives: string[];
   /** `'use server'` / `'use client'` occurrences with scope info. */
   directiveScopes: DirectiveOccurrence[];
+  /**
+   * Exact comment ranges from the parser (S5-C), for comment-stripping
+   * that is exact rather than heuristic. Populated when the file parsed
+   * (even with errors — ranges come from the lexer, not the AST).
+   * Undefined when the file was skipped, crashed, or comments unavailable.
+   * Offsets are JS string indices (UTF-16), safe for String.slice.
+   */
+  commentRanges?: Array<{ start: number; end: number }>;
 }
 
 function langFor(file: string): ParserOptions['lang'] {
@@ -356,6 +364,25 @@ export function parseSource(file: string, source: string): ModuleRecord {
   if (result.errors.length > 0) {
     rec.hasErrors = true;
     for (const e of result.errors.slice(0, 5)) rec.errors.push(e.message);
+  }
+
+  // Exact comment ranges from the lexer (S5-C). These are exact, not
+  // heuristic — the parser knows `//` inside `/[//]/` is regex content.
+  // Guarded: comments may be unavailable; undefined means "use heuristic".
+  try {
+    const comments = (result as { comments?: Array<{ start?: number; end?: number }> }).comments;
+    if (Array.isArray(comments)) {
+      const ranges: Array<{ start: number; end: number }> = [];
+      for (const c of comments) {
+        if (typeof c?.start === 'number' && typeof c?.end === 'number' && c.end > c.start) {
+          ranges.push({ start: c.start, end: c.end });
+        }
+      }
+      // Empty array = parser confirms zero comments (exact); undefined = unknown.
+      rec.commentRanges = ranges;
+    }
+  } catch {
+    // Comment extraction must never break parsing; heuristic fallback covers it.
   }
 
   const mod = result.module;

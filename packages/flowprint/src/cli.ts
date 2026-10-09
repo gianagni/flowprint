@@ -1,55 +1,61 @@
 #!/usr/bin/env tsx
 /**
- * Flowprint M0 — CLI (B4: per-app analysis first-class).
+ * Flowprint S4 — CLI: orientation-first experience.
  *
- *   flowprint <repo>                  Discovery only: list detected apps and
- *                                     unsupported boundaries + hint to --app.
- *   flowprint <repo> --app <sel>      Detailed analysis of one app (<sel> is a
- *                                     package name, repo-relative path, or '.'
- *                                     for the root app).
- *   flowprint <appDir>                Analyze the app at <appDir> directly.
+ *   flowprint [path]                 Analyze <path> (default: cwd).
+ *                                    - exactly one supported app → analyzed directly
+ *                                    - several supported apps → discovery listing (no guessing)
+ *                                    - none → honest notice, exit 0
+ *   flowprint [path] --app <sel>      Analyze one app in detail (<sel> is a
+ *                                    package name, repo-relative path, or '.').
+ *   flowprint [path] --full           Complete analysis report (no truncation).
+ *   flowprint --version               Print version.
  *   flowprint --help                  Show help.
  *
- * Discovery is always repo-wide and fast (package.json walk, no parsing).
- * Detailed analysis scopes the expensive walk + parse to one app dir;
- * cross-package imports resolve via the repo-wide package map.
+ * Exit codes: 0 success (including explicit no-supported-app finding),
+ * 1 analysis/runtime failure, 2 invalid invocation.
  */
 import { resolve, basename } from 'node:path';
 import { stat } from 'node:fs/promises';
 import { analyzeRepository, analyzeApp, findRepoRoot } from './index.js';
-import { discoverRepo, type DiscoveryResult } from './discovery/index.js';
-import { detectBoundaries } from './boundaries/detect.js';
-import { renderReport } from './render/index.js';
+import {
+  discoverRepo,
+  CHECKED_UNSUPPORTED_APP_FRAMEWORKS,
+  type DiscoveryResult,
+} from './discovery/index.js';
+import { detectBoundaries, frameworkScopeLines } from './boundaries/detect.js';
+import { renderReport, renderFullReport } from './render/index.js';
 import { renderBoundaries } from './render/boundaries.js';
 import { FLOWPRINT_VERSION } from './version.js';
 
 const HELP = `flowprint ${FLOWPRINT_VERSION} — local-first codebase orientation
 
 Usage:
-  flowprint <repo>                  Discovery: list detected apps and
-                                    unsupported boundaries for <repo>.
-  flowprint <repo> --app <sel>      Analyze one app in detail. <sel> is a
-                                    package name, a repo-relative path
-                                    (e.g. apps/web), or "." for the root app.
-  flowprint <appDir>                Analyze the app at <appDir> directly
-                                    (a package dir inside a repo, or a
-                                    standalone repo).
-  flowprint --help                  Show this help.
+  flowprint [path]                 Analyze <path> (default: current directory).
+                                   Exactly one supported app → analyzed directly.
+                                   Several supported apps → discovery listing;
+                                   pick one with --app (no app is guessed).
+                                   No supported app → honest notice, exit 0.
+  flowprint [path] --app <sel>     Analyze one app in detail. <sel> is a
+                                   package name, a repo-relative path
+                                   (e.g. apps/web), or "." for the root app.
+  flowprint [path] --full          Complete analysis report: every modeled
+                                   item, no truncation.
+  flowprint --version              Print version.
+  flowprint --help                 Show this help.
 
 Examples:
-  flowprint ~/code/myrepo
+  flowprint
   flowprint ~/code/myrepo --app apps/web
-  flowprint ~/code/myrepo/apps/web
+  flowprint ~/code/myrepo --full
 
 Notes:
-  - Discovery is always repo-wide and fast (package.json walk only).
   - Detailed analysis scopes the expensive file walk + parse to ONE app
-    dir; cross-package imports resolve through the repo-wide package map,
-    and targets outside the app dir are never parsed (edges degrade to
-    I/U honestly instead of inventing).
-  - Frameworks detected but outside analysis scope appear under
-    "Unsupported boundaries" — absence from Routes never means
-    absence of routes.`;
+    dir; cross-package imports resolve through the repo-wide package map.
+  - "No supported app" never means "no application exists": only a finite
+    list of framework checks is performed (see the notice).
+  - Hints refer to flags (e.g. "Re-run with --full"); npx does not install
+    the CLI into your PATH.`;
 
 function fail(msg: string): never {
   console.error(`flowprint: ${msg}`);
@@ -125,7 +131,11 @@ function printDiscovery(repoRoot: string, discovery: DiscoveryResult, ms: number
   lines.push('## Supported applications');
   const cands = discovery.appCandidates.filter((c) => c.hasAppConventions || c.hasPagesDir);
   if (cands.length === 0) {
+    // TR-005/AC-048: a quiet "none detected" must never read as "this repo
+    // has no applications" — state the finite detection scope explicitly.
     lines.push('  (none detected — no Next.js router conventions found)');
+    lines.push('  No app was analyzed.');
+    lines.push(...frameworkScopeLines(CHECKED_UNSUPPORTED_APP_FRAMEWORKS));
   }
   for (const c of [...cands].sort((a, b) => (a.dir < b.dir ? -1 : 1))) {
     lines.push(`  ${c.dir || '(root)'}${c.pkg?.name ? `   name=${c.pkg.name}` : ''}`);
@@ -150,7 +160,12 @@ function printDiscovery(repoRoot: string, discovery: DiscoveryResult, ms: number
   const bsec = renderBoundaries(detectBoundaries({ repoRoot, discovery }));
   if (bsec) lines.push(bsec);
   lines.push('hint:');
-  lines.push(`  flowprint ${repoRoot} --app <name|path>   analyze one app in detail`);
+  if (cands.length > 1) {
+    lines.push('  Several supported apps were found — no app was guessed.');
+    lines.push(`  flowprint ${repoRoot} --app <name|path>   analyze one app in detail`);
+  } else {
+    lines.push(`  flowprint ${repoRoot} --app <name|path>   analyze one app in detail`);
+  }
   lines.push(`  flowprint <appDir>                       analyze an app dir directly`);
   lines.push(bar);
   console.log(lines.join('\n'));
@@ -158,18 +173,28 @@ function printDiscovery(repoRoot: string, discovery: DiscoveryResult, ms: number
 
 async function main(): Promise<void> {
   const raw = process.argv.slice(2);
-  if (raw.length === 0 || raw.includes('--help') || raw.includes('-h')) {
+  if (raw.includes('--help') || raw.includes('-h')) {
     console.log(HELP);
-    process.exit(raw.length === 0 ? 2 : 0);
+    process.exit(0);
+  }
+  if (raw.includes('--version') || raw.includes('-v')) {
+    // S6 DEPENDENCY: version.ts reads ../../../package.json, which breaks
+    // under the built dist/ layout (S1 proved: shows 0.0.0). The final
+    // build-time version mechanism is S6 work — do not hardcode here.
+    console.log(`flowprint ${FLOWPRINT_VERSION}`);
+    process.exit(0);
   }
 
   let appSel: string | null = null;
+  let full = false;
   let target: string | null = null;
   for (let i = 0; i < raw.length; i++) {
     const a = raw[i];
     if (a === '--app') {
       appSel = raw[++i] ?? null;
       if (!appSel) fail('--app needs a value (package name, path, or ".")');
+    } else if (a === '--full') {
+      full = true;
     } else if (a.startsWith('-')) {
       fail(`unknown flag "${a}"`);
     } else if (target == null) {
@@ -178,7 +203,8 @@ async function main(): Promise<void> {
       fail(`unexpected argument "${a}"`);
     }
   }
-  if (!target) fail('missing <repo> or <appDir> path');
+  // Path is optional: default to the current working directory.
+  if (!target) target = process.cwd();
 
   const abs = resolve(target);
   if (!(await isDir(abs))) fail(`not a directory: ${target}`);
@@ -186,27 +212,37 @@ async function main(): Promise<void> {
   const t0 = Date.now();
 
   if (appSel) {
-    // flowprint <repo> --app <sel>
+    // flowprint [path] --app <sel>
     const discovery = await discoverRepo(abs);
     const dir = resolveAppSelection(discovery, appSel);
     const result = await analyzeRepository(abs, { appDirs: [dir] });
     result.durationMs = Date.now() - t0;
-    console.log(renderReport(result));
+    console.log(full ? renderFullReport(result) : renderReport(result));
     return;
   }
 
-  // flowprint <appDir>: path points at a package dir inside a repo
+  // flowprint [path]: path points at a package dir inside a repo
   // (repo root derived by walking up to the workspace marker).
   const root = await findRepoRoot(abs);
   if (root !== abs && (await hasPackageJson(abs))) {
     const result = await analyzeApp(abs, {});
     result.durationMs = Date.now() - t0;
-    console.log(renderReport(result));
+    console.log(full ? renderFullReport(result) : renderReport(result));
     return;
   }
 
-  // flowprint <repo>: discovery only.
+  // flowprint [path]: repo root (or cwd default). Discover first.
   const discovery = await discoverRepo(abs);
+  const supported = discovery.appCandidates.filter((c) => c.hasAppConventions || c.hasPagesDir);
+  if (supported.length === 1) {
+    // Exactly one supported app: analyze it directly.
+    const result = await analyzeRepository(abs, { appDirs: [supported[0].dir] });
+    result.durationMs = Date.now() - t0;
+    console.log(full ? renderFullReport(result) : renderReport(result));
+    return;
+  }
+  // Zero or several: discovery listing, no guessing. Exit 0 — discovery
+  // itself succeeded; "no app analyzed" is an explicit honest finding.
   printDiscovery(abs, discovery, Date.now() - t0);
 }
 

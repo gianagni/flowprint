@@ -6,6 +6,7 @@
  */
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
+import { dirErrorCode, safeRelPath, type DirReadFailure } from '../model/types.js';
 
 /** Directories never descended into during discovery. */
 export const SKIP_DIRS = new Set([
@@ -59,6 +60,8 @@ export interface DiscoveryResult {
   appCandidates: AppCandidate[];
   /** Packages that look like runnable apps on unsupported frameworks (DOGFOOD-03). */
   unsupportedAppCandidates: UnsupportedAppCandidate[];
+  /** Directories that could not be read during discovery (TR-006). */
+  dirReadFailures: DirReadFailure[];
 }
 
 /**
@@ -99,6 +102,15 @@ const UNSUPPORTED_APP_FRAMEWORKS: Array<{ dep: string; name: string }> = [
   { dep: '@react-router/serve', name: 'React Router' },
 ];
 
+/**
+ * Framework display names checked for unsupported-app candidates
+ * (runtime dependency + start script evidence). Exported (AC-048) so the
+ * detection scope can be stated truthfully in output.
+ */
+export const CHECKED_UNSUPPORTED_APP_FRAMEWORKS: readonly string[] = [
+  ...new Set(UNSUPPORTED_APP_FRAMEWORKS.map((f) => f.name)),
+];
+
 /** Runtime (non-dev) dependency names of a package. */
 function runtimeDepNames(pkg: PackageJsonInfo): Set<string> {
   const raw = pkg.raw['dependencies'];
@@ -114,11 +126,21 @@ async function walkPackageJsons(
   repoRoot: string,
   dir: string,
   out: string[],
+  dirReadFailures: DirReadFailure[],
 ): Promise<void> {
   let entries;
   try {
     entries = await readdir(dir, { withFileTypes: true });
-  } catch {
+  } catch (err) {
+    // TR-006: record unreadable directories instead of silently skipping.
+    const code = dirErrorCode(err);
+    if (code) {
+      dirReadFailures.push({
+        path: safeRelPath(repoRoot, dir),
+        error: code,
+        phase: 'discovery',
+      });
+    }
     return;
   }
   for (const e of entries) {
@@ -129,7 +151,7 @@ async function walkPackageJsons(
     if (!e.isDirectory() || e.name.startsWith('.') && e.name !== '.well-known') continue;
     if (SKIP_DIRS.has(e.name)) continue;
     // Route-group-style dirs like (ai) are fine; skip nothing else by name.
-    await walkPackageJsons(repoRoot, join(dir, e.name), out);
+    await walkPackageJsons(repoRoot, join(dir, e.name), out, dirReadFailures);
   }
 }
 
@@ -184,8 +206,9 @@ async function dirExists(abs: string): Promise<boolean> {
 }
 
 export async function discoverRepo(repoRoot: string): Promise<DiscoveryResult> {
+  const dirReadFailures: DirReadFailure[] = [];
   const pkgPaths: string[] = [];
-  await walkPackageJsons(repoRoot, repoRoot, pkgPaths);
+  await walkPackageJsons(repoRoot, repoRoot, pkgPaths, dirReadFailures);
 
   const packages: PackageJsonInfo[] = [];
   for (const p of pkgPaths.sort()) {
@@ -241,7 +264,7 @@ export async function discoverRepo(repoRoot: string): Promise<DiscoveryResult> {
     let hasConventions = false;
     for (const sub of ['app', 'src/app']) {
       const candAbs = join(appAbs, sub);
-      if (await hasConventionFileDeep(candAbs, PAGE_LAYOUT_RE)) {
+      if (await hasConventionFileDeep(repoRoot, candAbs, PAGE_LAYOUT_RE, dirReadFailures)) {
         hasConventions = true;
         appDirRel = pkg.dir ? `${pkg.dir}/${sub}` : sub;
         break;
@@ -254,7 +277,7 @@ export async function discoverRepo(repoRoot: string): Promise<DiscoveryResult> {
     if (!hasConventions && nextRange) {
       for (const sub of ['app', 'src/app']) {
         const candAbs = join(appAbs, sub);
-        if (await hasConventionFileDeep(candAbs, ROUTE_HANDLER_RE)) {
+        if (await hasConventionFileDeep(repoRoot, candAbs, ROUTE_HANDLER_RE, dirReadFailures)) {
           hasConventions = true;
           appDirRel = pkg.dir ? `${pkg.dir}/${sub}` : sub;
           break;
@@ -312,6 +335,7 @@ export async function discoverRepo(repoRoot: string): Promise<DiscoveryResult> {
     workspaces: { ghostDirs, patterns },
     appCandidates,
     unsupportedAppCandidates,
+    dirReadFailures,
   };
 }
 
@@ -320,12 +344,28 @@ const PAGE_LAYOUT_RE = /^(layout|page)\.(tsx|ts|jsx|js)$/;
 const ROUTE_HANDLER_RE = /^route\.(ts|js)$/;
 
 /** Bounded deep search for a convention file (max depth 4, skips noise). */
-async function hasConventionFileDeep(absDir: string, re: RegExp, depth = 0): Promise<boolean> {
+async function hasConventionFileDeep(
+  repoRoot: string,
+  absDir: string,
+  re: RegExp,
+  dirReadFailures: DirReadFailure[],
+  depth = 0,
+): Promise<boolean> {
   if (depth > 4) return false;
   let entries;
   try {
     entries = await readdir(absDir, { withFileTypes: true });
-  } catch {
+  } catch (err) {
+    // TR-006: record genuinely unreadable dirs; plain absence (ENOENT)
+    // is routine for probes like "does app/ exist?" and stays silent.
+    const code = dirErrorCode(err);
+    if (code) {
+      dirReadFailures.push({
+        path: safeRelPath(repoRoot, absDir),
+        error: code,
+        phase: 'discovery',
+      });
+    }
     return false;
   }
   for (const e of entries) {
@@ -334,7 +374,7 @@ async function hasConventionFileDeep(absDir: string, re: RegExp, depth = 0): Pro
   }
   for (const e of entries) {
     if (!e.isDirectory() || SKIP_DIRS.has(e.name) || e.name.startsWith('.')) continue;
-    if (await hasConventionFileDeep(join(absDir, e.name), re, depth + 1)) return true;
+    if (await hasConventionFileDeep(repoRoot, join(absDir, e.name), re, dirReadFailures, depth + 1)) return true;
   }
   return false;
 }

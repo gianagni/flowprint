@@ -201,9 +201,34 @@ export async function analyzeTrpcSurface(
       return null;
     }
   };
+  // TR-003: files already reported as isolation-gated (reported once each).
+  const gatedFiles = new Set<string>();
   const getProg = async (rel: string): Promise<N | null> => {
     const hit = astCache.get(rel);
     if (hit !== undefined) return hit;
+    // Never feed source to the in-process parser unless the isolated child
+    // successfully parsed the identical content first. A natively-crashing
+    // input (oxc SIGSEGV) would terminate the whole CLI — try/catch cannot
+    // contain it. Gated files become reported Unknown; the scan survives.
+    const rec = records.get(rel);
+    if (!rec || rec.crashed || rec.skipped) {
+      if (!gatedFiles.has(rel)) {
+        gatedFiles.add(rel);
+        unknowns.push({
+          kind: 'coverage',
+          category: 'trpc-isolation-gated',
+          subject: rel,
+          area: 'tRPC surface',
+          detail:
+            `${rel}: AST analysis skipped — the isolated parser ` +
+            `${!rec ? 'has no record for this file' : rec.crashed ? 'crashed on this file' : 'skipped this file'}; ` +
+            `unisolated parsing is not attempted`,
+          reason: 'crash isolation: in-process parse of unverified content could terminate the CLI',
+        });
+      }
+      astCache.set(rel, null);
+      return null;
+    }
     const text = await readText(rel);
     const prog = text ? parseAst(text, rel) : null;
     astCache.set(rel, prog);
@@ -263,6 +288,9 @@ export async function analyzeTrpcSurface(
 
   if (trpcTouched && adapterSites.length === 0) {
     unknowns.push({
+      kind: 'uncertainty',
+      category: 'trpc-mount-undetermined',
+      subject: '(repository)',
       area: 'tRPC surface',
       detail:
         'tRPC imports detected but no validated adapter call site ' +
@@ -360,6 +388,9 @@ export async function analyzeTrpcSurface(
     const t = await resolveImportTarget(fromFile, binding.specifier);
     if (!t) {
       unknowns.push({
+        kind: 'uncertainty',
+        category: 'trpc-enumeration-gap',
+        subject: `${fromFile} :: ${binding.specifier}`,
         area: 'tRPC surface',
         detail: `router binding "${name}" in ${fromFile}: import "${binding.specifier}" did not resolve — subtree not enumerated`,
         reason: 'router merge chain not fully traceable',
@@ -369,6 +400,9 @@ export async function analyzeTrpcSurface(
     const inner = await findExportedInit(t.file, binding.imported);
     if (!inner) {
       unknowns.push({
+        kind: 'uncertainty',
+        category: 'trpc-enumeration-gap',
+        subject: `${t.file} :: ${binding.imported}`,
         area: 'tRPC surface',
         detail: `router binding "${name}" in ${fromFile}: "${binding.imported}" not found in ${t.file} — subtree not enumerated`,
         reason: 'router merge chain not fully traceable',
@@ -412,6 +446,9 @@ export async function analyzeTrpcSurface(
       const key = propKey(pn);
       if (key === null) {
         unknowns.push({
+          kind: 'uncertainty',
+          category: 'trpc-enumeration-gap',
+          subject: `${defFile} :: ${prefix || '(root)'}`,
           area: 'tRPC surface',
           detail: `non-literal/spread router key in ${defFile} (prefix "${prefix || '(root)'}") — not enumerated`,
           reason: 'computed router keys are not a validated pattern',
@@ -422,6 +459,9 @@ export async function analyzeTrpcSurface(
       const target = await resolveRouterValue(defFile, pn['value'], new Set(seen), heuristic);
       if (!target) {
         unknowns.push({
+          kind: 'uncertainty',
+          category: 'trpc-enumeration-gap',
+          subject: `${defFile} :: ${dotted}`,
           area: 'tRPC surface',
           detail: `router value for "${dotted}" in ${defFile} does not match a validated pattern — not enumerated`,
           reason: 'unrecognized router value shape',
@@ -437,6 +477,9 @@ export async function analyzeTrpcSurface(
             await enumerateObject(sub.obj, dotted, sub.file, site, seen, heuristic || target.heuristic || sub.heuristic);
           } else if (sub) {
             unknowns.push({
+              kind: 'uncertainty',
+              category: 'trpc-enumeration-gap',
+              subject: `${target.file} :: ${dotted}`,
               area: 'tRPC surface',
               detail: `mergeRouters argument for "${dotted}" in ${target.file} is not a router object — skipped`,
               reason: 'merge argument shape not validated',
@@ -454,6 +497,9 @@ export async function analyzeTrpcSurface(
   for (const site of adapterSites) {
     if (!site.routerName) {
       unknowns.push({
+        kind: 'uncertainty',
+        category: 'trpc-mount-undetermined',
+        subject: site.file,
         area: 'tRPC surface',
         detail: `${site.file}: adapter call has no resolvable "router:" identifier — procedures not enumerated for this mount`,
         reason: 'router binding not statically determinable',
@@ -463,6 +509,9 @@ export async function analyzeTrpcSurface(
     const target = await resolveRouterValue(site.file, { type: 'Identifier', name: site.routerName }, new Set(), false);
     if (!target) {
       unknowns.push({
+        kind: 'uncertainty',
+        category: 'trpc-enumeration-gap',
+        subject: `${site.file} :: ${site.routerName}`,
         area: 'tRPC surface',
         detail: `${site.file}: router binding "${site.routerName}" does not match a validated router shape — procedures not enumerated`,
         reason: 'router definition not traceable',
@@ -480,6 +529,9 @@ export async function analyzeTrpcSurface(
       }
     } else {
       unknowns.push({
+        kind: 'uncertainty',
+        category: 'trpc-enumeration-gap',
+        subject: `${site.file} :: ${site.routerName}`,
         area: 'tRPC surface',
         detail: `${site.file}: "router:" binding "${site.routerName}" resolved to a procedure chain, not a router object`,
         reason: 'adapter router is not a router object',

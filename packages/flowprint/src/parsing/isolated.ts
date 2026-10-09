@@ -50,6 +50,10 @@ interface ChildDone {
   records: SerializedModuleRecord[];
 }
 
+interface ChildReady {
+  type: 'ready';
+}
+
 /**
  * JSON-safe wire form of ModuleRecord. The only non-JSON-able field in
  * ModuleRecord is `exportShape.namedCallExports` (a Map); everything else
@@ -106,6 +110,12 @@ interface BatchResult {
   code: number | null;
   signal: NodeJS.Signals | null;
   timedOut: boolean;
+  /**
+   * True when the child never ran user code: fork() threw, the child
+   * errored on spawn, or it died before receiving work. Distinct from a
+   * content crash (SIGSEGV on a poisoned file) — a systemic failure.
+   */
+  spawnFailed: boolean;
 }
 
 function describeCrash(r: BatchResult): string {
@@ -148,7 +158,7 @@ function runBatch(
         `[flowprint] PARSE CHILD failed to spawn for ${files.length} file(s): ` +
           `${err instanceof Error ? err.message : String(err)}`,
       );
-      finish({ ok: false, records: [], code: null, signal: null, timedOut: false });
+      finish({ ok: false, records: [], code: null, signal: null, timedOut: false, spawnFailed: true });
       return;
     }
 
@@ -162,14 +172,20 @@ function runBatch(
       } catch {
         // already gone; the 'exit' handler below finishes the batch
       }
-      finish({ ok: false, records: [], code: null, signal: null, timedOut: true });
+      finish({ ok: false, records: [], code: null, signal: null, timedOut: true, spawnFailed: false });
     }, timeoutMs);
     if (typeof timer.unref === 'function') timer.unref();
 
+    let receivedReady = false;
     child.on('message', (msg: unknown) => {
-      const m = msg as Partial<ChildDone> | null;
-      if (m && m.type === 'done' && Array.isArray(m.records)) {
-        const records = m.records.map(deserializeRecord);
+      const m = msg as Partial<ChildDone> | Partial<ChildReady> | null;
+      if (m && (m as Partial<ChildReady>).type === 'ready') {
+        receivedReady = true;
+        return;
+      }
+      const done = m as Partial<ChildDone> | null;
+      if (done && done.type === 'done' && Array.isArray(done.records)) {
+        const records = done.records.map(deserializeRecord);
         // Backfill insurance: any requested file with no record becomes a
         // crash record rather than silently vanishing.
         const seen = new Set(records.map((rec) => rec.file));
@@ -179,17 +195,23 @@ function runBatch(
             records.push(crashedRecord(f, 'child returned no record'));
           }
         }
-        finish({ ok: true, records, code: 0, signal: null, timedOut: false });
+        finish({ ok: true, records, code: 0, signal: null, timedOut: false, spawnFailed: false });
       }
     });
     child.on('error', (err) => {
       console.error(`[flowprint] PARSE CHILD error: ${err.message}`);
-      finish({ ok: false, records: [], code: null, signal: null, timedOut: false });
+      finish({ ok: false, records: [], code: null, signal: null, timedOut: false, spawnFailed: true });
     });
     child.on('exit', (code, signal) => {
       if (settled) return;
-      // Abnormal: died before posting 'done' (SIGSEGV, timeout kill, etc.).
-      finish({ ok: false, records: [], code, signal, timedOut: false });
+      // EC-01: died before 'ready' = never ran user code (missing entry,
+      // broken install). Died after 'ready' = content crash (SIGSEGV on
+      // input) — recorded and isolated via binary-split retry.
+      const neverRan = !receivedReady;
+      if (neverRan) {
+        console.error(`[flowprint] PARSE CHILD died before starting work (exit code=${code}); treating as spawn failure`);
+      }
+      finish({ ok: false, records: [], code, signal, timedOut: false, spawnFailed: neverRan });
     });
 
     const req: ChildRequest = { repoRoot, files };
@@ -201,7 +223,7 @@ function runBatch(
         `[flowprint] PARSE CHILD died before receiving work (${files.length} file(s)): ` +
           `${err instanceof Error ? err.message : String(err)}`,
       );
-      finish({ ok: false, records: [], code: null, signal: null, timedOut: false });
+      finish({ ok: false, records: [], code: null, signal: null, timedOut: false, spawnFailed: true });
     }
   });
 }
@@ -209,7 +231,11 @@ function runBatch(
 /**
  * Parse files with full child_process isolation. Returns a record per input
  * file; crashing files yield `crashed: true` records (see crashedRecord).
- * Never throws on child failure — the parent always survives.
+ * Per-file child failures never throw — the parent always survives those.
+ *
+ * EC-01: when EVERY child fails to spawn (systemic — the parser cannot run
+ * at all), this throws an actionable error instead of returning an
+ * almost-empty map that would render as a misleading "success" report.
  */
 export async function parseFilesIsolated(
   repoRoot: string,
@@ -222,6 +248,9 @@ export async function parseFilesIsolated(
 
   const out = new Map<string, ModuleRecord>();
   const unique = [...new Set(rels)].sort();
+  // EC-01: distinguish systemic spawn failure from per-file content crashes.
+  let okBatches = 0;
+  let spawnFailedBatches = 0;
 
   async function parseSet(files: string[]): Promise<void> {
     if (files.length === 0) return;
@@ -229,8 +258,10 @@ export async function parseFilesIsolated(
       // Base case: the crashing file is isolated — mark it, keep the scan.
       const r = await runBatch(repoRoot, files, timeoutMs);
       if (r.ok) {
+        okBatches++;
         for (const rec of r.records) out.set(rec.file, rec);
       } else {
+        if (r.spawnFailed) spawnFailedBatches++;
         logCrash(files, r);
         const detail = describeCrash(r);
         console.error(
@@ -251,8 +282,10 @@ export async function parseFilesIsolated(
         const batch = batches[next++];
         const r = await runBatch(repoRoot, batch, timeoutMs);
         if (r.ok) {
+          okBatches++;
           for (const rec of r.records) out.set(rec.file, rec);
         } else {
+          if (r.spawnFailed) spawnFailedBatches++;
           logCrash(batch, r);
           crashedBatches.push(batch);
         }
@@ -271,5 +304,18 @@ export async function parseFilesIsolated(
   }
 
   await parseSet(unique);
+
+  // EC-01/AC-043: every child failed to SPAWN (not per-file content crashes).
+  // The scan produced nothing real — fail loudly instead of printing a
+  // misleading almost-empty "success" report. The CLI maps this to exit 1.
+  if (unique.length > 0 && okBatches === 0 && spawnFailedBatches > 0) {
+    throw new Error(
+      `parser child process could not be spawned (${spawnFailedBatches} batch(es), ` +
+        `${unique.length} file(s) requested) — no file was parsed. ` +
+        `Check that the installed package includes the parser child entry and ` +
+        `that the Node.js version can fork child processes.`,
+    );
+  }
+
   return out;
 }

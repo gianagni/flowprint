@@ -97,3 +97,181 @@ export function edgeExpectationNote(nextMajor: number | null): string | null {
   if (nextMajor >= 16) return `Next.js ${nextMajor} ≥ 16: expects proxy.ts (middleware.ts renamed)`;
   return `Next.js ${nextMajor} ≤ 15: expects middleware.ts`;
 }
+
+/**
+ * Strip `//` line comments and `/* … *\/` block comments from TS/JS source
+ * for text-signal scans (TR-004), so commented-out code cannot drive
+ * findings. Respects single/double-quoted strings and template literals
+ * (including `${ … }` nesting).
+ *
+ * Comment detection needs no regex-vs-comment heuristic: in valid JS, a `/`
+ * followed by `/` or `*` outside a string/template literal is a comment
+ * start — UNLESS the `/` is escaped by an odd run of preceding backslashes,
+ * which proves we are inside a regex literal (`\/` cannot occur in valid
+ * code mode outside a regex: a code-mode `\` must start a `\u` identifier
+ * escape, always followed by `u`). So `//` and `/*` are stripped
+ * unconditionally in code mode, except after an odd `\` run.
+ *
+ * Note: `stripCommentsExact` (below) prefers parser-exact comment ranges
+ * and only uses this heuristic as a fallback for unparsed files. The exact
+ * ranges eliminate the character-class residual entirely.
+ *
+ * Pathological unbalanced input may desynchronize the scanner; behavior
+ * there is best-effort by design.
+ */
+export function stripTsComments(src: string): string {
+  type Frame = { mode: 'code'; inTpl: boolean; depth: number } | { mode: 'tpl' };
+  let out = '';
+  let i = 0;
+  const n = src.length;
+  const stack: Frame[] = [{ mode: 'code', inTpl: false, depth: 0 }];
+  let str: "'" | '"' | null = null;
+
+  while (i < n) {
+    const c = src[i];
+    const d = i + 1 < n ? src[i + 1] : '';
+    const frame = stack[stack.length - 1];
+
+    if (frame.mode === 'tpl') {
+      if (c === '`') {
+        out += c;
+        stack.pop();
+        i++;
+        continue;
+      }
+      if (c === '\\') {
+        out += c + d;
+        i += 2;
+        continue;
+      }
+      if (c === '$' && d === '{') {
+        out += '${';
+        stack.push({ mode: 'code', inTpl: true, depth: 0 });
+        i += 2;
+        continue;
+      }
+      out += c;
+      i++;
+      continue;
+    }
+
+    // code frame
+    if (str) {
+      out += c;
+      if (c === '\\') {
+        out += d;
+        i += 2;
+        continue;
+      }
+      if (c === str) {
+        str = null;
+      }
+      i++;
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      str = c;
+      out += c;
+      i++;
+      continue;
+    }
+    if (c === '`') {
+      stack.push({ mode: 'tpl' });
+      out += c;
+      i++;
+      continue;
+    }
+    if (frame.inTpl && c === '{') {
+      (frame as { depth: number }).depth++;
+      out += c;
+      i++;
+      continue;
+    }
+    if (frame.inTpl && c === '}') {
+      out += c;
+      const f = frame as { depth: number };
+      if (f.depth === 0) stack.pop();
+      else f.depth--;
+      i++;
+      continue;
+    }
+    // In code mode, `//` and `/*` are comment starts — UNLESS the `/` is
+    // escaped by an odd run of preceding backslashes. In valid JS, `\/`
+    // in code mode can only occur inside a regex literal: a `\` in code
+    // outside strings/templates/regexes must start a `\u` identifier
+    // escape (always followed by `u`, never `/`). So an odd `\` run
+    // proves we are inside a regex and this `/` is literal content.
+    // (Even run, e.g. `/\\/` + `//`, is a closed regex + real comment.)
+    if (c === '/' && (d === '/' || d === '*')) {
+      let bs = 0;
+      let j = i - 1;
+      while (j >= 0 && src[j] === '\\') {
+        bs++;
+        j--;
+      }
+      if (bs % 2 === 1) {
+        out += c;
+        i++;
+        continue;
+      }
+      if (d === '/') {
+        while (i < n && src[i] !== '\n') i++;
+        continue;
+      }
+      i += 2;
+      while (i < n && !(src[i] === '*' && src[i + 1] === '/')) i++;
+      i += 2;
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
+/**
+ * Strip comments using parser-exact ranges (S5-C), falling back to the
+ * heuristic `stripTsComments` when ranges are unavailable.
+ *
+ * Exact ranges come from the lexer's comment tokens — the parser knows
+ * `//` inside `/[//]/` is regex content, not a comment. This eliminates
+ * the heuristic's documented residual without building a custom lexer.
+ *
+ * Ranges are blanked (not deleted) with newlines preserved, so string
+ * length and line structure are unchanged. Out-of-bounds or overlapping
+ * ranges are ignored defensively; if anything looks wrong, falls back
+ * to the heuristic rather than producing corrupt output.
+ */
+export function stripCommentsExact(
+  src: string,
+  ranges: Array<{ start: number; end: number }> | undefined,
+): string {
+  // Undefined = unknown (skipped/crashed/unavailable) → heuristic fallback.
+  if (ranges === undefined) return stripTsComments(src);
+  // Empty array = parser confirms zero comments → nothing to strip.
+  // This is exact, not heuristic: the lexer saw no comment tokens.
+  if (ranges.length === 0) return src;
+  // Defensive validation: sorted, in-bounds, non-overlapping.
+  const sorted = [...ranges].sort((a, b) => a.start - b.start);
+  let prevEnd = 0;
+  for (const r of sorted) {
+    if (
+      !Number.isInteger(r.start) ||
+      !Number.isInteger(r.end) ||
+      r.start < 0 ||
+      r.end > src.length ||
+      r.end <= r.start ||
+      r.start < prevEnd
+    ) {
+      return stripTsComments(src);
+    }
+    prevEnd = r.end;
+  }
+  const chars = src.split('');
+  for (const r of sorted) {
+    for (let i = r.start; i < r.end; i++) {
+      if (chars[i] !== '\n') chars[i] = ' ';
+    }
+  }
+  return chars.join('');
+}

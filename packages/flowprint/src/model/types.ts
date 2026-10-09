@@ -1,4 +1,5 @@
 import type { RouterEvidence, RouterId } from '../framework/types.js';
+import { relative, sep } from 'node:path';
 
 /**
  * Flowprint M0 — analysis model.
@@ -33,6 +34,46 @@ export function unknown<T>(value: T, reason: string): Claim<T> {
   return { value, confidence: 'U', reason };
 }
 
+/**
+ * A directory that could not be read during discovery or analysis.
+ * Recorded structurally (TR-006) so the Coverage section (S4) can report
+ * unreadable paths with counts instead of silently skipping them.
+ */
+export interface DirReadFailure {
+  /** Repo-relative path of the unreadable directory. */
+  path: string;
+  /** Short error identity, e.g. "EACCES", "EPERM". */
+  error: string;
+  /** Which phase hit it, e.g. "discovery" or "analysis". */
+  phase: string;
+}
+
+/** Sink for directory-read failures; threading it keeps signatures honest. */
+export type DirFailureSink = (f: DirReadFailure) => void;
+
+/**
+ * Classify a directory-read error: returns the recordable error code, or
+ * null when the failure is routine absence (ENOENT/ENOTDIR) that probe-style
+ * walks (e.g. "does app/ exist?") legitimately tolerate.
+ */
+export function dirErrorCode(err: unknown): string | null {
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+  return code ?? 'unknown';
+}
+
+/**
+ * Best-effort repo-relative path for failure recording. Never throws —
+ * TR-006 recording itself must not crash the scan on unusual paths.
+ */
+export function safeRelPath(repoRoot: string, abs: string): string {
+  try {
+    return relative(repoRoot, abs).split(sep).join('/');
+  } catch {
+    return abs;
+  }
+}
+
 export interface AliasInfo {
   /** e.g. "@/*". */
   pattern: string;
@@ -49,6 +90,8 @@ export interface AppInfo {
   path: string;
   /** Framework identifier, e.g. "nextjs-app-router". */
   framework: Claim<string>;
+  /** Raw `next` dependency range from package.json, e.g. "^14.2.0" (S4 header). */
+  nextVersion: string | null;
   /** Repo-relative tsconfig paths applying to this app. */
   tsconfigs: string[];
   /** Aliases detected from the applicable tsconfigs. */
@@ -65,7 +108,10 @@ export interface AppInfo {
    * `entryPoints` (raw edge boundaries) does not.
    */
   startHere: StartHereItem[];
-  /** App-vs-Pages same-URL conflicts; pages wins per Next.js (GAP 5). */
+  /**
+   * App-vs-Pages same-URL conflicts (GAP 5). Structural facts only —
+   * no serving winner is claimed (see RouterConflict).
+   */
   routerConflicts: RouterConflict[];
   /** Per-router evidence from independent per-directory hybrid detection (B2). */
   routers: RouterEvidence[];
@@ -112,13 +158,21 @@ export interface StartHereItem {
   reason: string;
 }
 
-/** Same effective URL served by both App Router and Pages Router. */
+/**
+ * Same effective URL mapped by both App Router and Pages Router files.
+ *
+ * Structural fact only: both files exist and both map to this URL.
+ * The serving outcome is NOT claimed here — per the Next.js v13/v14
+ * routing documentation, the App Router takes priority and same-URL
+ * routes across directories cause a build-time error, but which (if
+ * either) route actually serves in a given repo/version cannot be
+ * established from files alone. See the accompanying `Finding` (category
+ * `router-collision-outcome`).
+ */
 export interface RouterConflict {
   url: string;
   appRouterFile: string;
   pagesRouterFile: string;
-  /** Next.js serves the Pages Router version on conflict. */
-  winner: 'pages';
 }
 
 /** One enumerated tRPC procedure (validated patterns only). */
@@ -145,6 +199,8 @@ export interface EntryPoint {
 export interface RouteInfo {
   /** Repo-relative file path of the route file. */
   file: string;
+  /** Route file kind for grouping (S4): page | api (route handler) | metadata | special. */
+  kind: 'page' | 'api' | 'metadata' | 'special';
   /** Which Next.js router this route file belongs to (B2: both routers reported). */
   router: Claim<RouterId>;
   /**
@@ -172,11 +228,126 @@ export interface ImportProbeResult {
   typeOnly: boolean;
 }
 
-export interface UnknownItem {
+/**
+ * S3 (F-4 contract): the *kind* of information a finding carries, independent
+ * of claim confidence (R/I/U).
+ *
+ * - `fact`: a structural fact observed in source/config (exists on disk,
+ *   observed absent on disk, matches a verified convention). Never labeled
+ *   `[U]` merely because a related runtime value is unknown.
+ * - `uncertainty`: behavior that cannot be determined from the static
+ *   evidence available. This is the only kind rendered as `[U]`.
+ * - `coverage`: an analytical coverage statistic or limitation (counts,
+ *   fallbacks, skipped/crashed files, unreadable directories, framework
+ *   detection scope). Never labeled `[U]`.
+ *
+ * Classification happens at the push site — each site knows its own
+ * semantics. Never re-derive kind from `area`/`detail` strings.
+ */
+export type FindingKind = 'fact' | 'uncertainty' | 'coverage';
+
+/**
+ * Controlled finding categories (S3). Closed union so the compiler enforces
+ * deterministic classification; a finding that cannot honestly be placed in
+ * `fact` or `coverage` defaults to `uncertainty` and must be flagged for
+ * review — never silently reclassified.
+ */
+export type FindingCategory =
+  // fact
+  | 'alias-target-absent'
+  | 'ghost-workspace'
+  | 'misplaced-directive-inert'
+  // uncertainty
+  | 'router-collision-outcome'
+  | 'dynamic-segment-values'
+  | 'parallel-slot-rendering'
+  | 'middleware-rewrite-behavior'
+  | 'hostname-dispatch'
+  | 'env-conditional-config'
+  | 'computed-rewrites'
+  | 'auth-wrapper-behavior'
+  | 'auth-enforcement-location'
+  | 'instrumentation-startup-behavior'
+  | 'embedded-framework-endpoints'
+  | 'trpc-mount-undetermined'
+  | 'trpc-enumeration-gap'
+  | 'server-action-status'
+  // coverage
+  | 'type-only-import-census'
+  | 'dist-src-fallback'
+  | 'parse-error-partial'
+  | 'parse-crash-skipped'
+  | 'skipped-file'
+  | 'trpc-isolation-gated'
+  | 'server-action-inventory-scope';
+
+/**
+ * Canonical category → kind mapping (S3). Single source of truth for
+ * deterministic classification: a finding's `kind` must equal the mapped
+ * kind of its `category` (enforced by regression test).
+ *
+ * Conservative policy for new categories: when a new finding cannot
+ * honestly be placed in `fact` or `coverage`, default to `uncertainty`
+ * and flag it for review — never silently claim a fact.
+ */
+export const FINDING_KIND_BY_CATEGORY: Record<FindingCategory, FindingKind> = {
+  'alias-target-absent': 'fact',
+  'ghost-workspace': 'fact',
+  'misplaced-directive-inert': 'fact',
+  'router-collision-outcome': 'uncertainty',
+  'dynamic-segment-values': 'uncertainty',
+  'parallel-slot-rendering': 'uncertainty',
+  'middleware-rewrite-behavior': 'uncertainty',
+  'hostname-dispatch': 'uncertainty',
+  'env-conditional-config': 'uncertainty',
+  'computed-rewrites': 'uncertainty',
+  'auth-wrapper-behavior': 'uncertainty',
+  'auth-enforcement-location': 'uncertainty',
+  'instrumentation-startup-behavior': 'uncertainty',
+  'embedded-framework-endpoints': 'uncertainty',
+  'trpc-mount-undetermined': 'uncertainty',
+  'trpc-enumeration-gap': 'uncertainty',
+  'server-action-status': 'uncertainty',
+  'type-only-import-census': 'coverage',
+  'dist-src-fallback': 'coverage',
+  'parse-error-partial': 'coverage',
+  'parse-crash-skipped': 'coverage',
+  'skipped-file': 'coverage',
+  'trpc-isolation-gated': 'coverage',
+  'server-action-inventory-scope': 'coverage',
+};
+
+/** All finding categories (derived from the canonical mapping). */
+export const FINDING_CATEGORIES = Object.keys(FINDING_KIND_BY_CATEGORY) as FindingCategory[];
+
+/**
+ * A structured finding (S3). `kind`/`category`/`subject` are the new
+ * evidence-first model; `area`/`detail`/`reason` are kept byte-compatible
+ * for the benchmark harness and the (S3-unchanged) renderer.
+ */
+export interface Finding {
+  kind: FindingKind;
+  category: FindingCategory;
+  /**
+   * Primary entity the finding is about: a repo-relative file path, a URL,
+   * an alias pattern, or a scope label such as `(repository)` for
+   * repo-wide aggregates. Never empty.
+   */
+  subject: string;
+  /** Legacy human-readable area (benchmark-matched; do not reword lightly). */
   area: string;
+  /** Legacy detail string (benchmark-matched; do not reword lightly). */
   detail: string;
+  /** Legacy reason string. */
   reason: string;
 }
+
+/**
+ * Legacy name for {@link Finding}. Kept for source compatibility; new code
+ * uses `Finding`.
+ * @deprecated Use `Finding`.
+ */
+export type UnknownItem = Finding;
 
 export interface ResolutionStats {
   total: number;
@@ -197,7 +368,16 @@ export interface AnalysisResult {
   /** Results for the harness-supplied probe imports (from the fixture). */
   importProbes: ImportProbeResult[];
   resolutionStats: ResolutionStats;
-  unknowns: UnknownItem[];
+  /**
+   * Structured findings (S3: kind/category/subject + legacy area/detail/reason).
+   * Field name kept for benchmark-harness compatibility.
+   */
+  unknowns: Finding[];
   /** Detected-but-unsupported frameworks/features (Blocker B3). Names what the analyzer does not cover. */
   boundaries: UnsupportedBoundary[];
+  /**
+   * Directories that could not be read (TR-006), discovery + analysis
+   * phases merged. Coverage (S4) reports the count and up to five paths.
+   */
+  dirReadFailures: DirReadFailure[];
 }

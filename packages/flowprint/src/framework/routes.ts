@@ -9,7 +9,8 @@
 import { readdir, stat, readFile } from 'node:fs/promises';
 import { join, relative, sep, dirname, basename } from 'node:path';
 import type { ModuleRecord } from '../parsing/index.js';
-import type { Claim } from '../model/types.js';
+import type { Claim, DirFailureSink } from '../model/types.js';
+import { dirErrorCode, safeRelPath } from '../model/types.js';
 
 function toRel(repoRoot: string, abs: string): string {
   return relative(repoRoot, abs).split(sep).join('/');
@@ -53,19 +54,26 @@ const SKIP = new Set(['node_modules', '.next', 'dist', 'build']);
 export { SKIP };
 
 async function walk(
+  repoRoot: string,
   absDir: string,
   visit: (absFile: string) => Promise<void>,
+  onDirFailure?: DirFailureSink,
 ): Promise<void> {
   let entries;
   try {
     entries = await readdir(absDir, { withFileTypes: true });
-  } catch {
+  } catch (err) {
+    // TR-006: record unreadable directories instead of silently skipping.
+    const code = dirErrorCode(err);
+    if (code && onDirFailure) {
+      onDirFailure({ path: safeRelPath(repoRoot, absDir), error: code, phase: 'analysis' });
+    }
     return;
   }
   for (const e of entries) {
     if (SKIP.has(e.name)) continue;
     const abs = join(absDir, e.name);
-    if (e.isDirectory()) await walk(abs, visit);
+    if (e.isDirectory()) await walk(repoRoot, abs, visit, onDirFailure);
     else if (e.isFile()) await visit(abs);
   }
 }
@@ -74,9 +82,10 @@ async function walk(
 export async function collectRouteFiles(
   repoRoot: string,
   appDirAbs: string,
+  onDirFailure?: DirFailureSink,
 ): Promise<RouteFileInfo[]> {
   const out: RouteFileInfo[] = [];
-  await walk(appDirAbs, async (absFile) => {
+  const visit = async (absFile: string): Promise<void> => {
     const base = basename(absFile);
     let kind: RouteFileInfo['kind'] | null = null;
     let leaf = '';
@@ -96,7 +105,8 @@ export async function collectRouteFiles(
     const appRel = toRel(repoRoot, appDirAbs);
     const segs = dirRel === appRel ? [] : dirRel.slice(appRel.length + 1).split('/');
     out.push({ file: toRel(repoRoot, absFile), kind, leaf, segments: segs });
-  });
+  };
+  await walk(repoRoot, appDirAbs, visit, onDirFailure);
   out.sort((a, b) => (a.file < b.file ? -1 : 1));
   return out;
 }

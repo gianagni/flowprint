@@ -7,9 +7,9 @@
  * detected INDEPENDENTLY, per directory. Neither detector is gated on the
  * other's presence or dominance — a pages-dominant hybrid app whose `app/`
  * holds only `route.ts` files still gets its App Router routes detected.
- * Both route sets are reported in the model; same-URL conflicts keep the
- * pages-wins rule (Next.js serves the Pages Router version) and are reported
- * explicitly in `routerConflicts`.
+ * Both route sets are reported in the model; same-URL conflicts are reported
+ * explicitly in `routerConflicts` as structural facts with NO serving winner
+ * claimed (the outcome is not statically decidable).
  */
 import { join } from 'node:path';
 import { stat } from 'node:fs/promises';
@@ -32,7 +32,7 @@ import {
   edgeExpectationNote,
   type EdgeEntryInfo,
 } from './edge.js';
-import type { Claim, UnknownItem, RouterConflict } from '../model/types.js';
+import type { Claim, UnknownItem, RouterConflict, DirFailureSink } from '../model/types.js';
 import { resolved, inferred } from '../model/types.js';
 import type { HybridDetection, PagesRouteInfo, RouterEvidence } from './types.js';
 
@@ -55,7 +55,7 @@ export interface FrameworkAppResult {
   specialFileCounts: Record<string, number>;
   /** Pages Router route files — full inventory with claims (B2; no longer comparison-only). */
   pagesRoutes: PagesRouteInfo[];
-  /** App-vs-Pages same-URL conflicts (pages wins). */
+  /** App-vs-Pages same-URL conflicts (structural facts; no winner claimed). */
   routerConflicts: RouterConflict[];
   /** Per-router evidence from independent per-directory detection (B2). */
   routerEvidence: RouterEvidence[];
@@ -94,6 +94,7 @@ async function detectAppRouter(
   repoRoot: string,
   appAbsDir: string,
   appRelDir: string,
+  onDirFailure?: DirFailureSink,
 ): Promise<{ evidence: RouterEvidence; routes: RouteFileInfo[] }> {
   const dirs: string[] = [];
   const routes: RouteFileInfo[] = [];
@@ -101,7 +102,7 @@ async function detectAppRouter(
     const abs = join(appAbsDir, sub);
     if (!(await dirExists(abs))) continue;
     dirs.push(relDir(appRelDir, sub));
-    routes.push(...(await collectRouteFiles(repoRoot, abs)));
+    routes.push(...(await collectRouteFiles(repoRoot, abs, onDirFailure)));
   }
   routes.sort((a, b) => (a.file < b.file ? -1 : 1));
   const found = routes.length > 0;
@@ -127,12 +128,13 @@ async function detectPagesRouter(
   appAbsDir: string,
   appRelDir: string,
   nextConfig: NextConfigSummary,
+  onDirFailure?: DirFailureSink,
 ): Promise<{ evidence: RouterEvidence; routes: PagesRouteInfo[] }> {
   const dirs: string[] = [];
   for (const sub of ['pages', 'src/pages']) {
     if (await dirExists(join(appAbsDir, sub))) dirs.push(relDir(appRelDir, sub));
   }
-  const raw = (await collectPagesRoutes(repoRoot, appAbsDir)) ?? [];
+  const raw = (await collectPagesRoutes(repoRoot, appAbsDir, onDirFailure)) ?? [];
   const locations = [`${relDir(appRelDir, 'pages')}`, `${relDir(appRelDir, 'src/pages')}`].join(' / ');
   const found = raw.length > 0;
   const evidence: RouterEvidence = {
@@ -163,10 +165,11 @@ async function detectRouters(
   repoRoot: string,
   candidate: AppCandidate,
   nextConfig: NextConfigSummary,
+  onDirFailure?: DirFailureSink,
 ): Promise<HybridDetection> {
   const appAbsDir = join(repoRoot, candidate.dir);
-  const app = await detectAppRouter(repoRoot, appAbsDir, candidate.dir);
-  const pages = await detectPagesRouter(repoRoot, appAbsDir, candidate.dir, nextConfig);
+  const app = await detectAppRouter(repoRoot, appAbsDir, candidate.dir, onDirFailure);
+  const pages = await detectPagesRouter(repoRoot, appAbsDir, candidate.dir, nextConfig, onDirFailure);
   const isHybrid = app.evidence.detected.value && pages.evidence.detected.value;
   return {
     app: app.evidence,
@@ -191,6 +194,7 @@ export async function analyzeFrameworkApp(
   repoRoot: string,
   candidate: AppCandidate,
   getRecord: (relPath: string) => Promise<ModuleRecord | null>,
+  onDirFailure?: DirFailureSink,
 ): Promise<FrameworkAppResult> {
   const notes: string[] = [];
   const unknowns: UnknownItem[] = [];
@@ -201,7 +205,7 @@ export async function analyzeFrameworkApp(
   const nextConfig = await summarizeNextConfig(repoRoot, candidate.dir);
 
   // B2: both routers detected independently; neither gates the other.
-  const detection = await detectRouters(repoRoot, candidate, nextConfig);
+  const detection = await detectRouters(repoRoot, candidate, nextConfig, onDirFailure);
   const routerEvidence: RouterEvidence[] = [detection.app, detection.pages];
 
   // Framework id + confidence from the independent evidence.
@@ -266,6 +270,9 @@ export async function analyzeFrameworkApp(
         reason: `embedded framework detected (${adapter.frameworkName} via ${adapter.viaSpecifier}) — endpoints Unknown; a Next-only detector must not claim this as one API route`,
       };
       unknowns.push({
+        kind: 'uncertainty',
+        category: 'embedded-framework-endpoints',
+        subject: f.file,
         area: `${adapter.frameworkName} endpoint surface`,
         detail: `${f.file} delegates to embedded ${adapter.frameworkName} (via ${adapter.viaSpecifier}); the ${adapter.frameworkName} route surface needs a ${adapter.frameworkName} detector`,
         reason: 'embedded framework detected — endpoints Unknown',
@@ -306,6 +313,9 @@ export async function analyzeFrameworkApp(
   }
   if (dynamicRouteCount > 0) {
     unknowns.push({
+      kind: 'uncertainty',
+      category: 'dynamic-segment-values',
+      subject: candidate.dir || '(repository)',
       area: 'dynamic segments',
       detail: `${dynamicRouteCount} route files contain dynamic segments; concrete URLs depend on runtime data — URL space unbounded`,
       reason: 'concrete segment values unknowable statically',
@@ -313,6 +323,9 @@ export async function analyzeFrameworkApp(
   }
   if (slotCount > 0) {
     unknowns.push({
+      kind: 'uncertainty',
+      category: 'parallel-slot-rendering',
+      subject: candidate.dir || '(repository)',
       area: 'parallel slot rendering',
       detail: `${slotCount} route files under parallel slots (@...); which slot content renders is conditional on navigation state`,
       reason: 'slot rendering is runtime-conditional',
@@ -321,8 +334,12 @@ export async function analyzeFrameworkApp(
 
   // ---- Router conflict detection: same effective URL in both routers ----
   // (B2: now compares the full App Router skeleton set against the full
-  // Pages Router inventory). Next.js serves the Pages Router version
-  // (pages-wins).
+  // Pages Router inventory). The collision itself is a structural fact
+  // (both files exist, both map to the URL). The serving outcome is NOT
+  // claimed: per the Next.js v13/v14 routing documentation the App Router
+  // takes priority and same-URL routes across directories cause a
+  // build-time error — but the actual outcome for a given repo/version
+  // cannot be established from files alone, so no winner is asserted.
   const routerConflicts: RouterConflict[] = [];
   const pagesRoutes = detection.pagesRoutes;
   if (pagesRoutes.length > 0 && routes.length > 0) {
@@ -334,18 +351,22 @@ export async function analyzeFrameworkApp(
     for (const p of pagesRoutes) {
       const hit = skeletonByUrl.get(p.url);
       if (hit) {
-        routerConflicts.push({ url: p.url, appRouterFile: hit, pagesRouterFile: p.file, winner: 'pages' });
+        routerConflicts.push({ url: p.url, appRouterFile: hit, pagesRouterFile: p.file });
       }
     }
     if (routerConflicts.length > 0) {
       notes.push(
-        `hybrid: ${routerConflicts.length} same-URL App-vs-Pages conflict(s); ` +
-          'Next.js serves the Pages Router version (pages-wins); see routerConflicts',
+        `hybrid: ${routerConflicts.length} same-URL App-vs-Pages conflict(s) — both files map to the same URL ` +
+          `(structural fact); the serving outcome is not claimed (Next.js docs describe such conflicts as a ` +
+          `build-time error in v13/v14, but this repo's outcome was not verified); see routerConflicts`,
       );
       unknowns.push({
+        kind: 'uncertainty',
+        category: 'router-collision-outcome',
+        subject: candidate.dir || '(repository)',
         area: 'router conflict',
-        detail: `${routerConflicts.length} URL(s) exist in both App Router and Pages Router (${routerConflicts.map((c) => c.url).join(', ')}); pages wins per Next.js`,
-        reason: 'same effective URL in both routers — serving is Pages Router',
+        detail: `${routerConflicts.length} URL(s) exist in both App Router and Pages Router (${routerConflicts.map((c) => c.url).join(', ')}); which route serves — or whether the build errors, as Next.js docs describe for v13/v14 — was not determined statically`,
+        reason: 'same effective URL in both routers — serving outcome not statically decidable; no winner claimed',
       });
     } else {
       notes.push(
@@ -366,6 +387,9 @@ export async function analyzeFrameworkApp(
   for (const e of edgeEntries) {
     if (e.wrapper) {
       unknowns.push({
+        kind: 'uncertainty',
+        category: 'auth-wrapper-behavior',
+        subject: e.file,
         area: 'auth gating',
         detail: `${e.file} default export is wrapped in ${e.wrapper}(...); wrapper behavior (e.g. session handling, redirects) needs the wrapper's internals`,
         reason: 'wrapper internals not analyzed in M0',
@@ -374,6 +398,9 @@ export async function analyzeFrameworkApp(
   }
   if (edgeEntries.length === 0) {
     unknowns.push({
+      kind: 'uncertainty',
+      category: 'auth-enforcement-location',
+      subject: candidate.dir || '(repository)',
       area: 'auth enforcement',
       detail: `no proxy.ts/middleware.ts edge entry in ${candidate.dir || '(repo root)'}; auth (if any) lives in framework adapters or layouts`,
       reason: 'no edge front door detected',

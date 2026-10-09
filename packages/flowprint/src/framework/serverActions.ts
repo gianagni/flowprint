@@ -43,6 +43,9 @@ export function inventoryServerActions(
 
     if (hasUseClient) {
       unknowns.push({
+        kind: 'uncertainty',
+        category: 'server-action-status',
+        subject: rec.file,
         area: 'server actions',
         detail: `${rec.file} contains both 'use client' and 'use server' — invalid per Next.js; server-action status unknown`,
         reason: "conflicting directives in one file; neither claim is safe",
@@ -109,6 +112,9 @@ export function inventoryServerActions(
 
     if (otherScopes.length > 0 && moduleScope.length === 0) {
       unknowns.push({
+        kind: 'fact',
+        category: 'misplaced-directive-inert',
+        subject: rec.file,
         area: 'server actions',
         detail: `${rec.file} has 'use server' outside the directive prologue — inert per Next.js (directive must lead the file); ignored`,
         reason: 'misplaced directive is not a valid server-action marker',

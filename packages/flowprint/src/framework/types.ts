@@ -6,8 +6,8 @@
  * gating one detector on the other's dominance. A repo with both an `app/`
  * dir containing route files (page/route/layout/...) and a `pages/` dir
  * containing page files gets BOTH detectors run and BOTH route sets reported.
- * Same-URL conflicts keep the pages-wins rule (Next.js serves the Pages
- * Router version); conflicts are reported explicitly in `routerConflicts`.
+ * Same-URL conflicts are reported explicitly in `routerConflicts` as
+ * structural facts; no serving winner is claimed (not statically decidable).
  *
  * Every new claim carries its R/I/U confidence at creation (architecture.md:
  * confidence lives in the model, never invented by the renderer).

@@ -102,6 +102,32 @@ function rebaseTargets(
   });
 }
 
+/**
+ * Classify a single tsconfig `paths` target with EXACTLY the resolver's
+ * semantics (mirrors rebaseTargets above), for honesty checks that must
+ * not disagree with the resolver (TR-001).
+ *
+ * Returns the absolute on-disk location whose static prefix should exist,
+ * or `{ chained: true }` when the target is a bare specifier naming a known
+ * workspace package (resolved through the package map, not the filesystem).
+ *
+ * Per TS semantics, a non-relative target that does NOT name a workspace
+ * package is baseUrl-relative (e.g. `"@/*": ["src/*"]` with
+ * `baseUrl: "."`) — it must NOT be misreported as an unresolvable
+ * "chained bare target".
+ */
+export function classifyPathTarget(
+  target: string,
+  baseDir: string,
+  nameToDir: Map<string, string>,
+): { abs: string } | { chained: true } {
+  if (!target.startsWith('.')) {
+    const { name } = splitBare(target.replace(/\/\*$/, '').replace(/\/$/, ''));
+    if (nameToDir.has(name)) return { chained: true };
+  }
+  return { abs: resolvePath(baseDir, target) };
+}
+
 interface LoadCtx {
   repoRoot: string;
   nameToDir: Map<string, string>;

@@ -1,0 +1,51 @@
+============================================================
+Flowprint 0.1.0-alpha.5 — taxonomy / (root)
+analyzed in 0.0s
+============================================================
+
+Framework  [R] nextjs-hybrid  (next 14.2.0)  — (root)
+  reason: `next` in package.json deps + router conventions present
+
+Start here
+  [R] app/layout.tsx — root App Router layout — wraps every route in the app
+  [R] app/page.tsx — root page — serves the app's base URL
+  [R] middleware.ts — request boundary — middleware.ts runs before routing
+  [R] instrumentation.ts — startup hook — instrumentation.ts runs once when the server starts
+
+Routes at a glance
+  5 route files: 4 page, 1 api, 0 metadata
+  by router: App Router 4, Pages Router 1
+  dynamic segments: 1 file(s) (e.g. [slug])
+  top-level: /about (2), / (1), /api (1), /blog (1)
+  router collisions: 1 URL(s) mapped by both routers (structural fact; no serving winner claimed — see Coverage)
+
+Runtime blind spots
+  dynamic-segment-values — 1 occurrence(s)
+    [U] 1 route files contain dynamic segments; concrete URLs depend on runtime data — URL space unbounded
+      reason: concrete segment values unknowable statically
+  hostname-dispatch — 1 occurrence(s)
+    [U] middleware.ts references "hostname" — whether requests are dispatched by hostname was not established from this reference
+      reason: a text reference is not evidence of hostname-based dispatch
+  instrumentation-startup-behavior — 1 occurrence(s)
+    [U] instrumentation.ts runs at server startup; scheduling/side effects are runtime
+      reason: startup behavior not verified statically
+  middleware-rewrite-behavior — 1 occurrence(s)
+    [U] middleware.ts references NextResponse.rewrite — whether rewrites remap URLs at runtime was not determined
+      reason: rewrite behavior is runtime logic
+  router-collision-outcome — 1 occurrence(s)
+    [U] 1 URL(s) exist in both App Router and Pages Router (/about); which route serves — or whether the build errors, as Next.js docs describe for v13/v14 — was not determined statically
+      reason: same effective URL in both routers — serving outcome not statically decidable; no winner claimed
+
+Coverage
+  Router collisions (structural fact — serving outcome not claimed):
+    /about  app=app/about/page.tsx  pages=pages/about.tsx
+  Analysis statistics:
+    import edges: 1  R=1  I=0  U=0
+    unreadable directories: 0
+  Framework detection scope:
+    Frameworks outside this list are not detected — "none detected"
+    means "none detected by these checks", not "no application exists".
+
+Next
+  Re-run with --full for the complete analysis report.
+============================================================

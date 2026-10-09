@@ -69,6 +69,29 @@ const RULES: FrameworkRule[] = [
 
 const DEP_SECTIONS = ['dependencies', 'devDependencies', 'peerDependencies'] as const;
 
+/**
+ * Frameworks Flowprint explicitly checks for via dependency-name scan.
+ * Exported (AC-048) so output and tests can state the detection scope
+ * truthfully — "no unsupported frameworks detected" must never imply
+ * global coverage. Frameworks outside this list are not detected.
+ */
+export const CHECKED_FRAMEWORKS: readonly string[] = RULES.map((r) => r.name);
+
+/**
+ * Human-readable detection-scope lines for "none detected" output
+ * (TR-005/AC-048). States the finite check list explicitly so quiet
+ * results are never misread as "this repo has no applications".
+ */
+export function frameworkScopeLines(unsupportedAppFrameworks: readonly string[]): string[] {
+  const scopeList = [...new Set([...CHECKED_FRAMEWORKS, ...unsupportedAppFrameworks])];
+  return [
+    '  Detection scope: Next.js App/Pages Router file conventions, plus',
+    `  dependency scan for: ${scopeList.join(', ')}.`,
+    '  Frameworks outside this list are not detected — "none detected"',
+    '  means "none detected by these checks", not "no application exists".',
+  ];
+}
+
 interface DepHit {
   /** Dependency name as written in package.json. */
   dep: string;

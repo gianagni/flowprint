@@ -1,0 +1,1 @@
+{"compilerOptions":{"declaration":false,"module":"NodeNext","moduleResolution":"NodeNext","outDir":"dist-stage/dist","rootDir":".","skipLibCheck":true,"sourceMap":false,"strict":true,"target":"ES2022","types":["node"]},"include":["packages/flowprint/src/**/*.ts"]}
